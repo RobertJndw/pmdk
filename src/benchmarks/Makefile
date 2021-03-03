@@ -42,6 +42,7 @@ SRC=pmembench.cpp\
     pmem_memset.cpp\
     pmem_memcpy.cpp\
     pmem_flush.cpp\
+	pmem2_flush.cpp\
     pmemobj_gen.cpp\
     pmemobj_persist.cpp\
     obj_pmalloc.cpp\
@@ -84,7 +85,7 @@ LIBS += ../debug/libpmemcore.a
 LIBS += ../debug/libpmemcommon.a
 endif
 CFLAGS += $(LIBNDCTL_CFLAGS)
-LIBS += -lpmemobj -lpmemlog -lpmemblk -lpmempool -lpmem -pthread -lm \
+LIBS += -lpmemobj -lpmemlog -lpmemblk -lpmempool -lpmem -lpmem2 -pthread -lm \
 	$(LIBDL) $(LIBUUID) $(LIBNDCTL_LIBS)
 ifeq ($(LIBRT_NEEDED), y)
 LIBS += -lrt
@@ -165,7 +166,7 @@ objdir=.
 	$(call check-cstyle, $<)
 	@mkdir -p .deps
 	$(CXX) -MD -c -o $@ $(CXXFLAGS) $(call coverage-path, $<)
-	$(call check-os, $@, $<)
+	#$(call check-os, $@, $<)
 	$(create-deps)
 
 %.htmp: %.h
