@@ -2,7 +2,7 @@
 /* Copyright 2016-2020, Intel Corporation */
 
 /*
- * pmem_flush.cpp -- benchmark implementation for pmem_persist and pmem_msync
+ * pmem2_flush.cpp -- benchmark implementation for pmem2_get_persist_fn
  */
 #include <cassert>
 #include <cerrno>
@@ -16,12 +16,6 @@
 
 #include <libpmem2.h>
 #include <libpmem.h>
-
-#ifndef _WIN32
-#include <unistd.h>
-#else
-#include <io.h>
-#endif
 
 #include "benchmark.hpp"
 #include "file.h"
@@ -70,6 +64,7 @@ struct pmem_args {
  * pmem_bench -- benchmark context
  */
 struct pmem_bench {
+	struct pmem2_map *map; /* Map used for persist operations */
 	uint64_t *offsets; /* write offsets */
 	size_t n_offsets;  /* number of elements in offsets array */
 	size_t fsize;	   /* The size of the allocated PMEM */
@@ -79,18 +74,12 @@ struct pmem_bench {
 	void *pmem_addr; /* PMEM base address */
 	size_t pmem_len; /* length of PMEM mapping */
 
-	struct pmem2_config *cfg;
-	struct pmem2_map *map;
-	struct pmem2_source *src;
-
-	int fd;
-
-	//void *invalid_addr;  /* invalid pages */
-	//void *nondirty_addr; /* non-dirty pages */
+	void *invalid_addr;  /* invalid pages */
+	void *nondirty_addr; /* non-dirty pages */
 
 	void *pmem_addr_aligned;     /* PMEM pages - 2M aligned */
-	//void *invalid_addr_aligned;  /* invalid pages - 2M aligned */
-	//void *nondirty_addr_aligned; /* non-dirty pages - 2M aligned */
+	void *invalid_addr_aligned;  /* invalid pages - 2M aligned */
+	void *nondirty_addr_aligned; /* non-dirty pages - 2M aligned */
 
 	/* the actual benchmark operation */
 	int (*func_op)(struct pmem_bench *pmb, void *addr, size_t len);
@@ -243,6 +232,69 @@ parse_op_type(const char *arg)
 	return -1;
 }
 
+// Imitates the pmem method pmem_map_file with the concept of pmem2
+static struct pmem2_map*
+pmem2_map_file(const char *path, size_t len, mode_t mode, size_t *mapped_lenp) {
+	//fprintf(stderr, "path %s size %zu mode %o mapped_lenp %p\n", path, len, mode, mapped_lenp);
+	int fd;
+	int open_flags = O_RDWR | O_CREAT;
+
+	struct pmem2_config *cfg;
+	struct pmem2_map *map;
+	struct pmem2_source *src;
+
+
+	if ((fd = os_open(path, open_flags, mode)) < 0) {
+		perror("open");	
+		return NULL;
+	}
+
+	if (os_ftruncate(fd, (os_off_t)len) != 0) {
+			perror("!ftruncate");
+			goto err_fd;
+	}
+
+	if (pmem2_config_new(&cfg)) {
+		pmem2_perror("pmem2_config_new");
+		goto err_fd;
+	}
+
+	if (pmem2_source_from_fd(&src, fd)) {
+		pmem2_perror("pmem2_source_from_fd");
+		goto err_delete_config;
+	}
+
+	if (pmem2_config_set_required_store_granularity(cfg,
+			PMEM2_GRANULARITY_PAGE)) {
+		pmem2_perror("pmem2_config_set_required_store_granularity");
+		goto err_source_delete;
+	}
+
+	// TODO not working correctly
+	if (pmem2_map_new(&map, cfg, src)) {
+		pmem2_perror("pmem2_map_new");
+		goto err_source_delete;
+	}
+
+	if (mapped_lenp != NULL)
+		*mapped_lenp = len;
+
+	pmem2_source_delete(&src);
+	pmem2_config_delete(&cfg);
+	os_close(fd);
+
+	return map;
+
+err_source_delete:
+	pmem2_source_delete(&src);
+err_delete_config:
+	pmem2_config_delete(&cfg);
+err_fd:
+	os_close(fd);
+
+	return NULL;
+}
+
 /*
  * pmem_flush_init -- benchmark initialization
  *
@@ -251,6 +303,10 @@ parse_op_type(const char *arg)
 static int
 pmem_flush_init(struct benchmark *bench, struct benchmark_args *args)
 {
+	// TODO
+	clock_t begin, end;
+	double time_spent;
+
 	assert(bench != nullptr);
 	assert(args != nullptr);
 
@@ -268,6 +324,7 @@ pmem_flush_init(struct benchmark *bench, struct benchmark_args *args)
 
 	pmb->pargs = (struct pmem_args *)args->opts;
 	assert(pmb->pargs != nullptr);
+
 
 	int i = parse_op_type(pmb->pargs->operation);
 	if (i == -1) {
@@ -298,56 +355,72 @@ pmem_flush_init(struct benchmark *bench, struct benchmark_args *args)
 	for (size_t i = 0; i < pmb->n_offsets; ++i)
 		pmb->offsets[i] = func_mode(pmb, i);
 
-	// TODO change syntax to match libpmem2 config
-	if ((pmb->fd = open(args->fname, O_RDWR | O_CREAT, args->fmode)) < 0) {
-		fprintf(stderr, "wrong file: %s\n", args->fname);
-		perror("open");	
+	
+	/* create a pmem file and memory map it */
+	pmb->map = pmem2_map_file(args->fname, pmb->fsize, args->fmode, &pmb->pmem_len);
+	pmb->pmem_addr = pmem2_map_get_address(pmb->map);
+	
+
+	if (pmb->pmem_addr == nullptr) {
+		perror("pmem_map_file");
 		goto err_free_pmb;
 	}
 
-	if (pmem2_config_new(&pmb->cfg)) {
-		pmem2_perror("pmem2_config_new");
-		goto err_fd;
+	pmb->nondirty_addr = mmap(nullptr, pmb->fsize, PROT_READ | PROT_WRITE,
+				  MAP_PRIVATE | MAP_ANON, -1, 0);
+
+	if (pmb->nondirty_addr == MAP_FAILED) {
+		perror("mmap(1)");
+		goto err_unmap1;
 	}
 
-	if (pmem2_source_from_fd(&pmb->src, pmb->fd)) {
-		pmem2_perror("pmem2_source_from_fd");
-		goto err_delete_config;
-	}
+	pmb->invalid_addr = mmap(nullptr, pmb->fsize, PROT_READ | PROT_WRITE,
+				 MAP_PRIVATE | MAP_ANON, -1, 0);
 
-	if (pmem2_config_set_required_store_granularity(pmb->cfg,
-			PMEM2_GRANULARITY_PAGE)) {
-		pmem2_perror("pmem2_config_set_required_store_granularity");
-		goto err_source_delete;
+	if (pmb->invalid_addr == MAP_FAILED) {
+		perror("mmap(2)");
+		goto err_unmap2;
 	}
-
-	// TODO not working correctly
-	if (pmem2_map_new(&pmb->map, pmb->cfg, pmb->src)) {
-		pmem2_perror("pmem2_map_new");
-		goto err_source_delete;
-	}
-
-	pmb->pmem_addr = pmem2_map_get_address(pmb->map);
-	pmb->pmem_len = pmem2_map_get_size(pmb->map);
+	munmap(pmb->invalid_addr, pmb->fsize);
 
 	pmb->pmem_addr_aligned =
 		(void *)(((uintptr_t)pmb->pmem_addr + PAGE_2M - 1) &
 			 ~(PAGE_2M - 1));
 
+	pmb->nondirty_addr_aligned =
+		(void *)(((uintptr_t)pmb->nondirty_addr + PAGE_2M - 1) &
+			 ~(PAGE_2M - 1));
+
+	pmb->invalid_addr_aligned =
+		(void *)(((uintptr_t)pmb->invalid_addr + PAGE_2M - 1) &
+			 ~(PAGE_2M - 1));
+
 	pmembench_set_priv(bench, pmb);
+	
+	if (!pmb->pargs->no_warmup) {
+		fprintf(stderr, "Pointer: %p\n", pmb->pmem_addr_aligned);
+		size_t off;
+		begin = clock();
+		for (off = 0; off < pmb->fsize - PAGE_2M; off += PAGE_4K) {
+			*(int *)((char *)pmb->pmem_addr_aligned + off) = 0;
+			*(int *)((char *)pmb->nondirty_addr_aligned + off) = 0;
+		}
+		end = clock();
+		time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+		fprintf(stderr, "Exection time: %f\n", time_spent);
+	}
 
 	return 0;
 
-err_source_delete:
-	pmem2_source_delete(&pmb->src);
-err_delete_config:
-	pmem2_config_delete(&pmb->cfg);
-err_fd:
-	close(pmb->fd);
+err_unmap2:
+	munmap(pmb->nondirty_addr, pmb->fsize);
+err_unmap1:
+	pmem_unmap(pmb->pmem_addr, pmb->pmem_len);
 err_free_pmb:
 	free(pmb);
 
 	return -1;
+	
 }
 
 /*
@@ -357,11 +430,8 @@ static int
 pmem_flush_exit(struct benchmark *bench, struct benchmark_args *args)
 {
 	auto *pmb = (struct pmem_bench *)pmembench_get_priv(bench);
-	/*
 	pmem2_map_delete(&pmb->map);
-	pmem2_source_delete(&pmb->src);
-	pmem2_config_delete(&pmb->cfg);
-	close(pmb->fd);*/
+	munmap(pmb->nondirty_addr, pmb->fsize);
 	free(pmb);
 
 	return 0;
@@ -382,7 +452,7 @@ pmem_flush_operation(struct benchmark *bench, struct operation_info *info)
 	void *addr = (char *)pmb->pmem_addr_aligned + chunk_idx * info->args->dsize;
 	
 	/* store + flush */
-	//*(int *)addr = *(int *)addr + 1;
+	*(int *)addr = *(int *)addr + 1;
 	pmb->func_op(pmb, addr, info->args->dsize);
 	return 0;
 }
@@ -426,7 +496,7 @@ pmem_flush_constructor(void)
 	pmem_flush_bench.clos = pmem_flush_clo;
 	pmem_flush_bench.nclos = ARRAY_SIZE(pmem_flush_clo);
 	pmem_flush_bench.opts_size = sizeof(struct pmem_args);
-	//pmem_flush_bench.rm_file = true;
+	pmem_flush_bench.rm_file = true;
 	pmem_flush_bench.allow_poolset = false;
 	REGISTER_BENCHMARK(pmem_flush_bench);
 }
