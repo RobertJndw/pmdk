@@ -234,15 +234,13 @@ parse_op_type(const char *arg)
 
 // Imitates the pmem method pmem_map_file with the concept of pmem2
 static struct pmem2_map*
-pmem2_map_file(const char *path, size_t len, mode_t mode, size_t *mapped_lenp) {
-	//fprintf(stderr, "path %s size %zu mode %o mapped_lenp %p\n", path, len, mode, mapped_lenp);
+pmem2_map_file(const char *path, size_t len, mode_t mode) {
 	int fd;
-	int open_flags = O_RDWR | O_CREAT;
+	int open_flags = O_RDWR | O_CREAT | O_EXCL;
 
 	struct pmem2_config *cfg;
 	struct pmem2_map *map;
 	struct pmem2_source *src;
-
 
 	if ((fd = os_open(path, open_flags, mode)) < 0) {
 		perror("open");	
@@ -250,9 +248,10 @@ pmem2_map_file(const char *path, size_t len, mode_t mode, size_t *mapped_lenp) {
 	}
 
 	if (os_ftruncate(fd, (os_off_t)len) != 0) {
-			perror("!ftruncate");
-			goto err_fd;
+		perror("!ftruncate");
+		goto err_fd;
 	}
+
 
 	if (pmem2_config_new(&cfg)) {
 		pmem2_perror("pmem2_config_new");
@@ -270,18 +269,14 @@ pmem2_map_file(const char *path, size_t len, mode_t mode, size_t *mapped_lenp) {
 		goto err_source_delete;
 	}
 
-	// TODO not working correctly
 	if (pmem2_map_new(&map, cfg, src)) {
 		pmem2_perror("pmem2_map_new");
 		goto err_source_delete;
 	}
 
-	if (mapped_lenp != NULL)
-		*mapped_lenp = len;
-
-	pmem2_source_delete(&src);
-	pmem2_config_delete(&cfg);
-	os_close(fd);
+	//pmem2_source_delete(&src);
+	//pmem2_config_delete(&cfg);
+	//os_close(fd);
 
 	return map;
 
@@ -296,16 +291,17 @@ err_fd:
 }
 
 /*
- * pmem_flush_init -- benchmark initialization
+ * pmem2_persist_init -- benchmark initialization
  *
  * Parses command line arguments, allocates persistent memory, and maps it.
  */
 static int
-pmem_flush_init(struct benchmark *bench, struct benchmark_args *args)
+pmem2_flush_init(struct benchmark *bench, struct benchmark_args *args)
 {
 	// TODO
 	clock_t begin, end;
 	double time_spent;
+	begin = clock();
 
 	assert(bench != nullptr);
 	assert(args != nullptr);
@@ -355,12 +351,11 @@ pmem_flush_init(struct benchmark *bench, struct benchmark_args *args)
 	for (size_t i = 0; i < pmb->n_offsets; ++i)
 		pmb->offsets[i] = func_mode(pmb, i);
 
-	
+
 	/* create a pmem file and memory map it */
-	pmb->map = pmem2_map_file(args->fname, pmb->fsize, args->fmode, &pmb->pmem_len);
+	pmb->map = pmem2_map_file(args->fname, pmb->fsize, args->fmode);
 	pmb->pmem_addr = pmem2_map_get_address(pmb->map);
 	
-
 	if (pmb->pmem_addr == nullptr) {
 		perror("pmem_map_file");
 		goto err_free_pmb;
@@ -398,7 +393,6 @@ pmem_flush_init(struct benchmark *bench, struct benchmark_args *args)
 	pmembench_set_priv(bench, pmb);
 	
 	if (!pmb->pargs->no_warmup) {
-		fprintf(stderr, "Pointer: %p\n", pmb->pmem_addr_aligned);
 		size_t off;
 		begin = clock();
 		for (off = 0; off < pmb->fsize - PAGE_2M; off += PAGE_4K) {
@@ -410,6 +404,10 @@ pmem_flush_init(struct benchmark *bench, struct benchmark_args *args)
 		fprintf(stderr, "Exection time: %f\n", time_spent);
 	}
 
+	end = clock();
+	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+	fprintf(stderr, "Exection time INIT: %f\n", time_spent);
+	
 	return 0;
 
 err_unmap2:
@@ -427,13 +425,20 @@ err_free_pmb:
  * pmem_flush_exit -- benchmark cleanup
  */
 static int
-pmem_flush_exit(struct benchmark *bench, struct benchmark_args *args)
+pmem2_flush_exit(struct benchmark *bench, struct benchmark_args *args)
 {
+	clock_t begin, end;
+	double time_spent;
+	begin = clock();
 	auto *pmb = (struct pmem_bench *)pmembench_get_priv(bench);
 	pmem2_map_delete(&pmb->map);
+	
 	munmap(pmb->nondirty_addr, pmb->fsize);
 	free(pmb);
 
+	end = clock();
+	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+	fprintf(stderr, "Exection time EXIT: %f\n", time_spent);
 	return 0;
 }
 
@@ -441,7 +446,7 @@ pmem_flush_exit(struct benchmark *bench, struct benchmark_args *args)
  * pmem_flush_operation -- actual benchmark operation
  */
 static int
-pmem_flush_operation(struct benchmark *bench, struct operation_info *info)
+pmem2_flush_operation(struct benchmark *bench, struct operation_info *info)
 {
 	auto *pmb = (struct pmem_bench *)pmembench_get_priv(bench);
 
@@ -458,45 +463,45 @@ pmem_flush_operation(struct benchmark *bench, struct operation_info *info)
 }
 
 /* structure to define command line arguments */
-static struct benchmark_clo pmem_flush_clo[3];
+static struct benchmark_clo pmem2_persist_clo[3];
 /* Stores information about benchmark. */
-static struct benchmark_info pmem_flush_bench;
+static struct benchmark_info pmem2_persist_bench;
 CONSTRUCTOR(pmem_flush_constructor)
 void
 pmem_flush_constructor(void)
 {
-	pmem_flush_clo[0].opt_short = 'o';
-	pmem_flush_clo[0].opt_long = "operation";
-	pmem_flush_clo[0].descr = "Operation type - persist, persist_4k, persist_2M";
-	pmem_flush_clo[0].type = CLO_TYPE_STR;
-	pmem_flush_clo[0].off = clo_field_offset(struct pmem_args, operation);
-	pmem_flush_clo[0].def = "noop";
+	pmem2_persist_clo[0].opt_short = 'o';
+	pmem2_persist_clo[0].opt_long = "operation";
+	pmem2_persist_clo[0].descr = "Operation type - persist, persist_4k, persist_2M";
+	pmem2_persist_clo[0].type = CLO_TYPE_STR;
+	pmem2_persist_clo[0].off = clo_field_offset(struct pmem_args, operation);
+	pmem2_persist_clo[0].def = "noop";
 
-	pmem_flush_clo[1].opt_short = 0;
-	pmem_flush_clo[1].opt_long = "mode";
-	pmem_flush_clo[1].descr = "mode - stat, seq or rand";
-	pmem_flush_clo[1].type = CLO_TYPE_STR;
-	pmem_flush_clo[1].off = clo_field_offset(struct pmem_args, mode);
-	pmem_flush_clo[1].def = "stat";
+	pmem2_persist_clo[1].opt_short = 0;
+	pmem2_persist_clo[1].opt_long = "mode";
+	pmem2_persist_clo[1].descr = "mode - stat, seq or rand";
+	pmem2_persist_clo[1].type = CLO_TYPE_STR;
+	pmem2_persist_clo[1].off = clo_field_offset(struct pmem_args, mode);
+	pmem2_persist_clo[1].def = "stat";
 
-	pmem_flush_clo[2].opt_short = 'w';
-	pmem_flush_clo[2].opt_long = "no-warmup";
-	pmem_flush_clo[2].descr = "Don't do warmup";
-	pmem_flush_clo[2].type = CLO_TYPE_FLAG;
-	pmem_flush_clo[2].off = clo_field_offset(struct pmem_args, no_warmup);
+	pmem2_persist_clo[2].opt_short = 'w';
+	pmem2_persist_clo[2].opt_long = "no-warmup";
+	pmem2_persist_clo[2].descr = "Don't do warmup";
+	pmem2_persist_clo[2].type = CLO_TYPE_FLAG;
+	pmem2_persist_clo[2].off = clo_field_offset(struct pmem_args, no_warmup);
 
-	pmem_flush_bench.name = "pmem2_get_persist_fn";
-	pmem_flush_bench.brief = "Benchmark for pmem2_get_persist_fn() ";
-	pmem_flush_bench.init = pmem_flush_init;
-	pmem_flush_bench.exit = pmem_flush_exit;
-	pmem_flush_bench.multithread = true;
-	pmem_flush_bench.multiops = true;
-	pmem_flush_bench.operation = pmem_flush_operation;
-	pmem_flush_bench.measure_time = true;
-	pmem_flush_bench.clos = pmem_flush_clo;
-	pmem_flush_bench.nclos = ARRAY_SIZE(pmem_flush_clo);
-	pmem_flush_bench.opts_size = sizeof(struct pmem_args);
-	pmem_flush_bench.rm_file = true;
-	pmem_flush_bench.allow_poolset = false;
-	REGISTER_BENCHMARK(pmem_flush_bench);
+	pmem2_persist_bench.name = "pmem2_get_persist_fn";
+	pmem2_persist_bench.brief = "Benchmark for pmem2_get_persist_fn() ";
+	pmem2_persist_bench.init = pmem2_flush_init;
+	pmem2_persist_bench.exit = pmem2_flush_exit;
+	pmem2_persist_bench.multithread = true;
+	pmem2_persist_bench.multiops = true;
+	pmem2_persist_bench.operation = pmem2_flush_operation;
+	pmem2_persist_bench.measure_time = true;
+	pmem2_persist_bench.clos = pmem2_persist_clo;
+	pmem2_persist_bench.nclos = ARRAY_SIZE(pmem2_persist_clo);
+	pmem2_persist_bench.opts_size = sizeof(struct pmem_args);
+	pmem2_persist_bench.rm_file = true;
+	pmem2_persist_bench.allow_poolset = false;
+	REGISTER_BENCHMARK(pmem2_persist_bench);
 }
