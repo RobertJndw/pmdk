@@ -401,7 +401,7 @@ pmem2_flush_init(struct benchmark *bench, struct benchmark_args *args)
 		}
 		end = clock();
 		time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-		fprintf(stderr, "Exection time: %f\n", time_spent);
+		fprintf(stderr, "Exection time WARMUP: %f\n", time_spent);
 	}
 
 	end = clock();
@@ -413,7 +413,7 @@ pmem2_flush_init(struct benchmark *bench, struct benchmark_args *args)
 err_unmap2:
 	munmap(pmb->nondirty_addr, pmb->fsize);
 err_unmap1:
-	pmem_unmap(pmb->pmem_addr, pmb->pmem_len);
+	pmem2_map_delete(&pmb->map);
 err_free_pmb:
 	free(pmb);
 
@@ -490,7 +490,7 @@ pmem_flush_constructor(void)
 	pmem2_persist_clo[2].type = CLO_TYPE_FLAG;
 	pmem2_persist_clo[2].off = clo_field_offset(struct pmem_args, no_warmup);
 
-	pmem2_persist_bench.name = "pmem2_get_persist_fn";
+	pmem2_persist_bench.name = "pmem2_persist";
 	pmem2_persist_bench.brief = "Benchmark for pmem2_get_persist_fn() ";
 	pmem2_persist_bench.init = pmem2_flush_init;
 	pmem2_persist_bench.exit = pmem2_flush_exit;

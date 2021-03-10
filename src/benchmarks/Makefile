@@ -43,6 +43,8 @@ SRC=pmembench.cpp\
     pmem_memcpy.cpp\
     pmem_flush.cpp\
 	pmem2_flush.cpp\
+	pmem2_memset.cpp\
+    pmem2_memcpy.cpp\
     pmemobj_gen.cpp\
     pmemobj_persist.cpp\
     obj_pmalloc.cpp\
